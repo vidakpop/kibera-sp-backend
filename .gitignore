@@ -39,3 +39,14 @@ backups/
 uploads/
 media/
 static/uploads/
+
+# Cache
+cache/
+*.cache
+.cache/
+
+# Generated files
+generated_map.html
+
+# Vercel
+.vercel
