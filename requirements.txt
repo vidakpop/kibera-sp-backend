@@ -16,4 +16,4 @@ numpy>=1.26.0
 networkx>=3.0.0
 
 # Agent-Based Modeling
-Mesa>=3.0.0
+# Mesa removed to save space (replaced with lightweight internal implementation)

@@ -25,7 +25,24 @@ warnings.filterwarnings("ignore", category=UserWarning)
 load_dotenv()
 
 # --- Imports ---
-import mesa
+# import mesa <-- REMOVED
+# Custom Lightweight Mesa Implementation to save space (no scipy required)
+class Agent:
+    def __init__(self, unique_id, model):
+        self.unique_id = unique_id
+        self.model = model
+
+    def step(self):
+        pass
+
+class Model:
+    def __init__(self):
+        self.schedule = []
+        self.running = True
+
+    def step(self):
+        pass
+
 # import osmnx as ox  <-- REMOVED
 import networkx as nx
 import pandas as pd
@@ -281,9 +298,9 @@ class SanitationOptimizer:
         return history, OD_Events, total_revenue
 
 # --- 3. Simulation Model ---
-class Resident(mesa.Agent):
+class Resident(Agent):
     def __init__(self, unique_id, model, home_node, income):
-        super().__init__(model)
+        super().__init__(unique_id, model)
         self.unique_id = unique_id
         self.current_node = home_node
         self.wealth = income
@@ -303,7 +320,7 @@ class Resident(mesa.Agent):
             self.wealth -= 5
             self.bladder = 0
 
-class KiberaSimulation(mesa.Model):
+class KiberaSimulation(Model):
     def __init__(self, num_agents=200, flood_event=False):
         super().__init__()
 
@@ -537,11 +554,29 @@ def generate_map(suggestions=[]):
     
     return map_path
 
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    print("=" * 50)
+    print("🚀 Starting K-SISP Platinum API...")
+    print(f"📊 Data Status:")
+    print(f"   Graph Nodes: {len(G_WALK.nodes) if G_WALK else 0}")
+    print(f"   Existing Toilets: {len(B_TOILETS) if not B_TOILETS.empty else 0}")
+    print(f"   Rivers/Streams: {len(B_RIVERS) if B_RIVERS else 0}")
+    print(f"🌐 Server running on: http://0.0.0.0:{PORT}")
+    print("=" * 50)
+    yield
+    # Shutdown
+    print("🛑 Shutting down...")
+
 # --- 5. FastAPI Application ---
 app = FastAPI(
     title="K-SISP Platinum API",
     description="Kibera Sanitation Intelligence Platform - Platinum Edition",
-    version="3.0.0"
+    version="3.0.0",
+    lifespan=lifespan
 )
 
 # CORS middleware
@@ -743,23 +778,7 @@ async def refresh_osm_data():
         "message": "Live data refresh is disabled in serverless mode. Please run scripts/generate_data.py locally and deploy."
     }
 
-# --- 6. Startup and Shutdown Events ---
-@app.on_event("startup")
-async def startup_event():
-    """Initialize services on startup"""
-    print("=" * 50)
-    print("🚀 Starting K-SISP Platinum API...")
-    print(f"📊 Data Status:")
-    print(f"   Graph Nodes: {len(G_WALK.nodes) if G_WALK else 0}")
-    print(f"   Existing Toilets: {len(B_TOILETS) if not B_TOILETS.empty else 0}")
-    print(f"   Rivers/Streams: {len(B_RIVERS) if B_RIVERS else 0}")
-    print(f"🌐 Server running on: http://0.0.0.0:{PORT}")
-    print("=" * 50)
 
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Cleanup on shutdown"""
-    print("🛑 Shutting down...")
 
 # --- 7. Main Execution ---
 if __name__ == "__main__":
