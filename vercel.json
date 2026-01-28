@@ -3,14 +3,14 @@
   "rewrites": [
     {
       "source": "/(.*)",
-      "destination": "/app.py"
+      "destination": "/api/index.py"
     }
   ],
   "env": {
     "PORT": "8001"
   },
   "functions": {
-    "app.py": {
+    "api/index.py": {
       "memory": 1024,
       "maxDuration": 60,
       "excludeFiles": "{scripts/**,__pycache__/**,debug_optimize.py,venv/**,.env*}"
