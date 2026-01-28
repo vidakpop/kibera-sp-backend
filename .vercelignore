@@ -1,0 +1,6 @@
+scripts/
+venv/
+debug_optimize.py
+.env
+__pycache__/
+*.pyc
