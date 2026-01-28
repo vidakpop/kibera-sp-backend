@@ -579,11 +579,19 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# CORS Configuration
+# Note: Browsers block "Access-Control-Allow-Origin: *" if "Access-Control-Allow-Credentials: true"
+# We'll disable credentials if a wildcard is used.
+allow_creds = True
+if "*" in CORS_ORIGINS:
+    allow_creds = False
+    print("⚠️ CORS Wildcard detected. Credentials (cookies) disabled.")
+
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
-    allow_credentials=True,
+    allow_credentials=allow_creds,
     allow_methods=["*"],
     allow_headers=["*"],
 )
