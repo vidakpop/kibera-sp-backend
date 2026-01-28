@@ -4,6 +4,7 @@ import traceback
 import threading
 import time
 import random
+import json
 from typing import List, Dict, Optional
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, BackgroundTasks
@@ -25,13 +26,13 @@ load_dotenv()
 
 # --- Imports ---
 import mesa
-import osmnx as ox
+# import osmnx as ox  <-- REMOVED
 import networkx as nx
 import pandas as pd
 import numpy as np
-import geopandas as gpd
+# import geopandas as gpd <-- REMOVED
 import folium
-from shapely.geometry import Point
+# from shapely.geometry import Point <-- REMOVED (mostly)
 
 # --- Configuration ---
 PORT = int(os.getenv("PORT", 8001))
@@ -43,9 +44,6 @@ class SimulationRequest(BaseModel):
     flood: bool = False
     steps: int = Field(20, ge=1, le=100)
 
-class OptimizationResponse(BaseModel):
-    proposed_locations: List[Dict[str, float]]
-    status: str
 class OptimizationResponse(BaseModel):
     proposed_locations: List[Dict[str, float]]
     existing_toilets: List[Dict[str, float]] = []
@@ -73,65 +71,73 @@ class AggregateSimulationResponse(BaseModel):
 # --- 1. Data Layer ---
 class DigitalTwinBuilder:
     def __init__(self):
-        # Kibera bounding box - updated for better coverage
-        self.bbox_tuple = (36.7830, -1.3220, 36.7970, -1.3080)  # Slightly expanded
+        # Kibera bounding box
+        self.bbox_tuple = (36.7830, -1.3220, 36.7970, -1.3080)
         self.G = None
-        self.toilets = None
-        self.rivers = None
+        self.toilets = pd.DataFrame() # Initialize as empty DataFrame
+        self.rivers = [] # Initialize as empty list
         
     def fetch_data(self, force_refresh: bool = False):
-        """Fetch OSM data with caching"""
+        """Fetch data from static files"""
         if not force_refresh and hasattr(self, '_data_loaded') and self._data_loaded:
             return self.G, self.toilets, self.rivers
             
-        print(f"🌍 Connecting to OSM...")
+        print(f"🌍 Loading pre-computed data...")
         
+        # Load Graph
+        graph_path = "data/kibera_walk.graphml"
         try:
-            self.G = ox.graph_from_bbox(bbox=self.bbox_tuple, network_type='walk', simplify=True)
-            print(f"✅ Graph loaded with {len(self.G.nodes)} nodes and {len(self.G.edges)} edges")
+            if os.path.exists(graph_path):
+                self.G = nx.read_graphml(graph_path)
+                # Convert string attributes to float if needed (GraphML often stores as string)
+                # Ensure node x/y are floats
+                # Note: osmnx saves with types usually, but let's be safe
+                if len(self.G) > 0:
+                    sample_node = list(self.G.nodes(data=True))[0]
+                    if isinstance(sample_node[1].get('x'), str):
+                        for n, d in self.G.nodes(data=True):
+                            if 'x' in d: d['x'] = float(d['x'])
+                            if 'y' in d: d['y'] = float(d['y'])
+                    # Edge weights
+                    sample_edge = list(self.G.edges(data=True))[0]
+                    if isinstance(sample_edge[2].get('length'), str):
+                         for u, v, d in self.G.edges(data=True):
+                             if 'length' in d: d['length'] = float(d['length'])
+
+                print(f"✅ Graph loaded with {len(self.G.nodes)} nodes and {len(self.G.edges)} edges")
+            else:
+                print(f"❌ Graph file not found at {graph_path}")
+                self.G = nx.Graph()
         except Exception as e:
             print(f"❌ Error loading graph: {e}")
-            self.G = None
+            self.G = nx.Graph()
 
-        # Try multiple toilet tags to get more results
-        toilet_tags = [
-            {'amenity': 'toilets'},
-            {'amenity': 'sanitary_dump_station'},
-            {'amenity': 'public_toilet'},
-            {'toilets': 'yes'},
-            {'toilets': 'public'},
-            {'amenity': 'water_point'},
-            {'amenity': 'shower'}
-        ]
-        
-        all_toilets = []
-        for tags in toilet_tags:
-            try:
-                toilets = ox.features_from_bbox(bbox=self.bbox_tuple, tags=tags)
-                if not toilets.empty:
-                    print(f"  Found {len(toilets)} features with tags: {tags}")
-                    all_toilets.append(toilets)
-            except Exception as e:
-                continue
-        
-        if all_toilets:
-            self.toilets = pd.concat(all_toilets).drop_duplicates()
-            print(f"✅ Total unique toilets found: {len(self.toilets)}")
-        else:
-            self.toilets = gpd.GeoDataFrame()
-            print("⚠️ No toilets found with any tags")
-
-        tags_w = {'waterway': ['river', 'stream', 'drain']}
+        # Load Toilets
+        toilets_path = "data/toilets.csv"
         try:
-            self.rivers = ox.features_from_bbox(bbox=self.bbox_tuple, tags=tags_w)
-            if not self.rivers.empty:
-                print(f"✅ Rivers/streams found: {len(self.rivers)}")
+            if os.path.exists(toilets_path):
+                self.toilets = pd.read_csv(toilets_path)
+                print(f"✅ Total unique toilets found: {len(self.toilets)}")
             else:
-                print("⚠️ No rivers/streams found")
-                self.rivers = gpd.GeoDataFrame()
+                print("⚠️ No toilets file found")
+                self.toilets = pd.DataFrame()
         except Exception as e:
-            print(f"⚠️ Could not fetch rivers: {e}")
-            self.rivers = gpd.GeoDataFrame()
+            print(f"⚠️ Could not load toilets: {e}")
+            self.toilets = pd.DataFrame()
+
+        # Load Rivers
+        rivers_path = "data/rivers.json"
+        try:
+            if os.path.exists(rivers_path):
+                with open(rivers_path, 'r') as f:
+                    self.rivers = json.load(f)
+                print(f"✅ Rivers/streams loaded: {len(self.rivers)}")
+            else:
+                print("⚠️ No rivers file found")
+                self.rivers = []
+        except Exception as e:
+            print(f"⚠️ Could not load rivers: {e}")
+            self.rivers = []
             
         self._data_loaded = True
         return self.G, self.toilets, self.rivers
@@ -140,40 +146,74 @@ class DigitalTwinBuilder:
 builder = DigitalTwinBuilder()
 G_WALK, B_TOILETS, B_RIVERS = builder.fetch_data()
 
+# --- Helper: Nearest Node ---
+# We no longer have ox.nearest_nodes. Implement a simple one using NumPy.
+def get_nearest_nodes(graph, x_vals, y_vals):
+    """
+    Find nearest nodes in graph for given x, y coordinates.
+    Uses generic numpy broadcasting for small-medium graphs.
+    """
+    if not graph or len(graph.nodes) == 0:
+        return []
+        
+    # Extract graph nodes
+    # nodes are usually ints (osmid)
+    node_ids = np.array(list(graph.nodes()))
+    
+    # Extract coordinates
+    # We assume 'x' and 'y' attributes exist
+    node_coords = np.array([[graph.nodes[n]['x'], graph.nodes[n]['y']] for n in node_ids])
+    
+    # Target points
+    target_coords = np.column_stack((x_vals, y_vals))
+    
+    # Calculate squared Euclidean distance (no need for sqrt causing performance hit for argmin)
+    # Using broadcasting: (M, 1, 2) - (N, 2) -> (M, N, 2)
+    # This might be memory heavy for 1000 agents X 3000 nodes = 3M float pairs.
+    # For one-by-one or small batches it's fine. 
+    # For initial toilet locations (small N), it's fine.
+    
+    nearest_ids = []
+    
+    # Do it iteratively if targets length is small to save memory, or vectorized if small graph
+    # 3000 nodes is small.
+    for target in target_coords:
+        dists = np.sum((node_coords - target)**2, axis=1)
+        min_idx = np.argmin(dists)
+        nearest_ids.append(node_ids[min_idx])
+        
+    return nearest_ids
+
 # --- 2. Optimization Engine ---
 class SanitationOptimizer:
     @staticmethod
-    def find_sanitation_deserts(graph, toilets_gdf, num_suggestions: int = 3):
+    def find_sanitation_deserts(graph, toilets_df, num_suggestions: int = 3):
         print("🧠 Running Optimization Algorithm...")
         nodes = list(graph.nodes(data=True))
-        candidate_nodes = [n[0] for n in nodes]
+        candidate_nodes = [n[0] for n in nodes] # list of node IDs
 
-        # FIXED: Handle CRS projection properly
-        if toilets_gdf is not None and not toilets_gdf.empty:
-            # Handle CRS projection to avoid warnings
-            if toilets_gdf.crs and toilets_gdf.crs.is_geographic:
-                # Project to Web Mercator for accurate centroid calculation
-                toilets_projected = toilets_gdf.to_crs(epsg=3857)
-                toilet_pts = toilets_projected.centroid
-                # Convert back to original CRS for OSMnx
-                toilet_pts = toilet_pts.to_crs(toilets_gdf.crs)
-            else:
-                toilet_pts = toilets_gdf.centroid
+        if toilets_df is not None and not toilets_df.empty:
+            # toilets_df has 'lat', 'lon'
+            toilet_pts_x = toilets_df['lon'].values
+            toilet_pts_y = toilets_df['lat'].values
             
-            print(f"✅ Found {len(toilet_pts)} toilet points for optimization")
+            print(f"✅ Found {len(toilets_df)} toilet points for optimization")
             
-            existing_facility_nodes = ox.nearest_nodes(
+            existing_facility_nodes = get_nearest_nodes(
                 graph, 
-                toilet_pts.x.values, 
-                toilet_pts.y.values,
-                return_dist=False
+                toilet_pts_x, 
+                toilet_pts_y
             )
         else:
             print("⚠️ No toilet data available, using fallback")
-            existing_facility_nodes = [candidate_nodes[0]]
+            existing_facility_nodes = [candidate_nodes[0] if candidate_nodes else 0]
 
         # Approximate Calculation (Random Sampling for speed)
         sample_size = min(200, len(candidate_nodes))
+        # Ensure candidate_nodes not empty
+        if not candidate_nodes:
+            return []
+            
         sample_candidates = np.random.choice(candidate_nodes, sample_size, replace=False)
         best_candidates = []
 
@@ -274,20 +314,23 @@ class KiberaSimulation(mesa.Model):
         self.flood_active = flood_event
 
         if not B_TOILETS.empty:
-            t_centroids = B_TOILETS.centroid
-            self.toilet_nodes = ox.nearest_nodes(
+            # Handle conversion from DataFrame to points
+            t_x = B_TOILETS['lon'].values
+            t_y = B_TOILETS['lat'].values
+            
+            self.toilet_nodes = get_nearest_nodes(
                 self.G, 
-                t_centroids.x.values, 
-                t_centroids.y.values,
-                return_dist=False
+                t_x, 
+                t_y
             )
         else:
-            self.toilet_nodes = [self.nodes[0]]
+            self.toilet_nodes = [self.nodes[0]] if self.nodes else []
 
-        for i in range(num_agents):
-            start_node = np.random.choice(self.nodes)
-            a = Resident(i, self, start_node, 50)
-            self.custom_agents_list.append(a)
+        if self.nodes:
+            for i in range(num_agents):
+                start_node = np.random.choice(self.nodes)
+                a = Resident(i, self, start_node, 50)
+                self.custom_agents_list.append(a)
 
     def get_nearest_toilet_dist(self, node_id):
         try:
@@ -356,7 +399,8 @@ def generate_map(suggestions=[]):
     ).add_to(m)
     
     # Add existing toilets if available
-    if not B_TOILETS.empty and len(B_TOILETS) > 0:
+    # B_TOILETS is now a pandas DataFrame with lat/lon cols
+    if B_TOILETS is not None and not B_TOILETS.empty:
         print(f"📊 Adding {len(B_TOILETS)} existing toilets to map")
         
         # Create a feature group for better organization
@@ -365,10 +409,8 @@ def generate_map(suggestions=[]):
         for idx, row in B_TOILETS.iterrows():
             try:
                 # Get point location
-                if hasattr(row.geometry, 'centroid'):
-                    centroid = row.geometry.centroid
-                else:
-                    centroid = row.geometry
+                lat = row['lat']
+                lon = row['lon']
                 
                 # Create detailed popup
                 amenity = row.get('amenity', 'N/A')
@@ -377,14 +419,14 @@ def generate_map(suggestions=[]):
                     <h4 style="color: green; margin: 0">🚽 Existing Toilet</h4>
                     <hr style="margin: 5px 0">
                     <b>Type:</b> {amenity}<br>
-                    <b>Latitude:</b> {centroid.y:.6f}<br>
-                    <b>Longitude:</b> {centroid.x:.6f}
+                    <b>Latitude:</b> {lat:.6f}<br>
+                    <b>Longitude:</b> {lon:.6f}
                 </div>
                 """
                 
                 # Create green toilet marker
                 folium.Marker(
-                    [centroid.y, centroid.x],
+                    [lat, lon],
                     popup=folium.Popup(popup_html, max_width=300),
                     tooltip=f"Toilet: {amenity}",
                     icon=folium.Icon(
@@ -536,7 +578,7 @@ async def status():
         "data_loaded": builder._data_loaded if hasattr(builder, '_data_loaded') else False,
         "graph_nodes": len(G_WALK.nodes) if G_WALK else 0,
         "toilets_count": len(B_TOILETS) if not B_TOILETS.empty else 0,
-        "rivers_count": len(B_RIVERS) if not B_RIVERS.empty else 0,
+        "rivers_count": len(B_RIVERS) if B_RIVERS else 0,
         "bbox": builder.bbox_tuple
     }
 
@@ -547,27 +589,23 @@ async def debug_toilets():
         if B_TOILETS is not None and not B_TOILETS.empty:
             features = []
             for idx, row in B_TOILETS.head(10).iterrows():  # Show first 10
-                if hasattr(row.geometry, 'centroid'):
-                    centroid = row.geometry.centroid
-                    features.append({
-                        'index': idx,
-                        'amenity': row.get('amenity', 'unknown'),
-                        'lat': centroid.y,
-                        'lon': centroid.x,
-                        'geometry_type': row.geometry.geom_type
-                    })
+                # Use simple access
+                features.append({
+                    'index': idx,
+                    'amenity': row.get('amenity', 'unknown'),
+                    'lat': row['lat'],
+                    'lon': row['lon']
+                })
             
             return {
                 'count': len(B_TOILETS),
                 'sample_features': features,
-                'columns': list(B_TOILETS.columns),
-                'crs': str(B_TOILETS.crs) if hasattr(B_TOILETS, 'crs') else 'No CRS'
+                'columns': list(B_TOILETS.columns)
             }
         else:
             return {
                 'count': 0,
-                'message': 'No toilet data available',
-                'is_empty': B_TOILETS.empty if hasattr(B_TOILETS, 'empty') else True
+                'message': 'No toilet data available'
             }
     except Exception as e:
         return {'error': str(e)}
@@ -587,7 +625,7 @@ def get_optimization_suggestions(num_locations: int = 3):
                 "lat": pt['y'], 
                 "lon": pt['x'], 
                 "score": float(dist),
-                "node_id": node_id
+                "node_id": str(node_id)
             })
         
         map_path = generate_map(suggestions)
@@ -598,14 +636,12 @@ def get_optimization_suggestions(num_locations: int = 3):
         if B_TOILETS is not None and not B_TOILETS.empty:
             for idx, row in B_TOILETS.iterrows():
                 try:
-                    if hasattr(row.geometry, 'centroid'):
-                        centroid = row.geometry.centroid
-                        existing_list.append({
-                            "lat": centroid.y,
-                            "lon": centroid.x,
-                            "amenity": row.get('amenity', 'unknown'),
-                            "node_id": str(idx)
-                        })
+                    existing_list.append({
+                        "lat": row['lat'],
+                        "lon": row['lon'],
+                        "amenity": row.get('amenity', 'unknown'),
+                        "node_id": str(idx)
+                    })
                 except Exception:
                     continue
 
@@ -702,17 +738,10 @@ async def get_generated_map():
 @app.post("/refresh-data")
 async def refresh_osm_data():
     """Force refresh OSM data"""
-    try:
-        global G_WALK, B_TOILETS, B_RIVERS
-        G_WALK, B_TOILETS, B_RIVERS = builder.fetch_data(force_refresh=True)
-        return {
-            "status": "data_refreshed", 
-            "timestamp": time.time(),
-            "toilets_count": len(B_TOILETS) if not B_TOILETS.empty else 0,
-            "rivers_count": len(B_RIVERS) if not B_RIVERS.empty else 0
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return {
+        "status": "deprecated", 
+        "message": "Live data refresh is disabled in serverless mode. Please run scripts/generate_data.py locally and deploy."
+    }
 
 # --- 6. Startup and Shutdown Events ---
 @app.on_event("startup")
@@ -723,7 +752,7 @@ async def startup_event():
     print(f"📊 Data Status:")
     print(f"   Graph Nodes: {len(G_WALK.nodes) if G_WALK else 0}")
     print(f"   Existing Toilets: {len(B_TOILETS) if not B_TOILETS.empty else 0}")
-    print(f"   Rivers/Streams: {len(B_RIVERS) if not B_RIVERS.empty else 0}")
+    print(f"   Rivers/Streams: {len(B_RIVERS) if B_RIVERS else 0}")
     print(f"🌐 Server running on: http://0.0.0.0:{PORT}")
     print("=" * 50)
 
